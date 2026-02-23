@@ -4,7 +4,7 @@ Your awesome Distance Vector router for CS 168
 Based on skeleton code by:
   MurphyMc, zhangwen0411, lab352
 """
-
+from collections import defaultdict
 import sim.api as api
 from cs168.dv import (
     RoutePacket,
@@ -58,7 +58,7 @@ class DVRouter(DVRouterBase):
         self.table.owner = self
 
         ##### Begin Stage 10A #####
-
+        self.history = defaultdict(dict)
         ##### End Stage 10A #####
 
     def add_static_route(self, host, port):
@@ -132,22 +132,28 @@ class DVRouter(DVRouterBase):
 
         for destination, route in self.table.items():
             for port in self.ports.get_all_ports():
+                    # if not at port we want to advertise to
+                    if single_port is not None and port is not single_port:
+                        continue
+                    
+                    if self.POISON_REVERSE and port == route.port:
+                        latency = INFINITY
+                    elif self.SPLIT_HORIZON and port == route.port:
+                        continue
+                    else:
+                        latency = route.latency
 
-                # if not at port we want to advertise to
-                if single_port is not None and port is not single_port:
-                    continue
-                
-                if self.POISON_REVERSE and port == route.port:
-                    latency = INFINITY
-                elif self.SPLIT_HORIZON and port == route.port:
-                    continue
-                else:
-                    latency = route.latency
+                    if latency > INFINITY:
+                        latency = INFINITY
+                    
 
-                if latency > INFINITY:
-                    latency = INFINITY
-
-                self.send_route(port, destination, latency)
+                    if force == True:
+                        self.send_route(port, destination, latency)
+                        self.history[port][destination] = latency
+                    else:
+                        if destination not in self.history[port] or self.history[port][destination] != latency:
+                            self.send_route(port, destination, latency)
+                            self.history[port][destination] = latency
 
         ##### End Stages 3, 6, 7, 8, 10 #####
 
@@ -186,16 +192,22 @@ class DVRouter(DVRouterBase):
         """
         
         ##### Begin Stages 4, 10 #####
-        current_entry = self.table.get(route_dst)
+        current_route = self.table.get(route_dst)
         new_latency = route_latency + self.ports.get_latency(port)
 
-        if current_entry is not None:
-            current_next_hop = current_entry.port
-        else:
-            current_next_hop = None
+        current_next_hop = current_route.port if current_route is not None else None
 
-        if current_entry is None or (current_entry is not None and new_latency < current_entry.latency) or port == current_next_hop:
-            self.table[route_dst] = TableEntry(dst=route_dst, port=port, latency=new_latency, expire_time=api.current_time()+self.ROUTE_TTL)
+        if not (current_route is None or (current_route is not None and new_latency < current_route.latency) or port == current_next_hop):
+            return
+
+        new_entry = TableEntry(dst=route_dst, port=port, latency=new_latency, expire_time=api.current_time() + self.ROUTE_TTL)
+
+        changed = current_route is None or new_entry.port != current_next_hop or new_entry.latency != current_route.latency
+
+        self.table[route_dst] = new_entry
+
+        if changed:
+            self.send_routes(force=False)
         ##### End Stages 4, 10 #####
 
     def handle_link_up(self, port, latency):
@@ -209,7 +221,11 @@ class DVRouter(DVRouterBase):
         self.ports.add_port(port, latency)
 
         ##### Begin Stage 10B #####
+        if port not in self.history:
+            self.history[port] = {}
 
+        if self.SEND_ON_LINK_UP:
+            self.send_routes(force=True, single_port=port)
         ##### End Stage 10B #####
 
     def handle_link_down(self, port):
@@ -222,7 +238,16 @@ class DVRouter(DVRouterBase):
         self.ports.remove_port(port)
 
         ##### Begin Stage 10B #####
-
+        if self.POISON_ON_LINK_DOWN:
+            now = api.current_time()
+            for dst, route in list(self.table.items()):
+                if route.port == port:
+                    self.table[dst] = TableEntry(dst=dst, port=port, latency=INFINITY, expire_time=now + self.ROUTE_TTL)
+            self.send_routes(force=False)
+        else:
+            for dst, route in list(self.table.items()):
+                if route.port == port:
+                    self.table.pop(dst)
         ##### End Stage 10B #####
 
     # Feel free to add any helper methods!
